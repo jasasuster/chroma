@@ -1,0 +1,573 @@
+import argparse
+import functools
+import html
+import importlib
+import re
+import sys
+import types
+
+import pystache
+from pygments import lexer as pygments_lexer
+from pygments.token import _TokenType
+
+TEMPLATE = r"""
+<lexer>
+  <config>
+    <name>{{name}}</name>
+  </rules>
+</lexer>
+"""
+
+
+def xml_regex(s: str) -> str:
+    # Convert Python-style capture groups to .NET-style capture groups
+    s = s.replace("(?P", "(?")
+
+    return xml_string(s)
+
+
+def xml_string(s):
+    s = html.escape(s)
+    return '"' + s + '"'
+
+def to_camel_case(snake_str):
+    components = snake_str.split("_")
+    return "".join(x.title() for x in components)
+
+
+def warning(message):
+    print("warning: " + message, file=sys.stderr)
+
+
+def resolve_emitter(emitter):
+    if isinstance(emitter, types.FunctionType):
+        if repr(emitter).startswith("<function bygroups."):
+            args = emitter.__closure__[0].cell_contents
+            emitter = "<bygroups>%s</bygroups>" % "".join(
+                resolve_emitter(e) for e in args
+            )
+        elif repr(emitter).startswith("<function using."):
+            args = emitter.__closure__[0].cell_contents
+            if isinstance(args, dict):
+                state = "root"
+                if "stack" in args:
+                    state = args["stack"][1]
+                    args.pop("stack")
+                assert args == {}, args
+                emitter = '<usingself state="%s"/>' % state
+            elif isinstance(args, type) and issubclass(args, pygments_lexer.Lexer):
+                name = args.__name__
+                if name.endswith("Lexer"):
+                    name = name[:-5]
+                emitter = '<using lexer="%s"/>' % name
+            else:
+                raise ValueError(
+                    'only support "using" with lexer classes, not %r' % args
+                )
+        else:
+            warning("unsupported emitter function %r" % emitter)
+            emitter = "?? %r ??" % emitter
+    elif isinstance(emitter, _TokenType):
+        emitter = '<token type="%s"/>' % str(emitter).replace(".", "")[5:]
+    elif emitter is None:
+        return "None"
+    else:
+        raise ValueError("unsupported emitter type %r" % emitter)
+    assert isinstance(emitter, str)
+    return emitter
+
+def process_state_action(action):
+    if isinstance(action, tuple):
+        return functools.reduce(
+            lambda a, b: a + b, (process_state_action(a) for a in action)
+        )
+    if action.startswith("#"):
+        action = action[1:]
+        if action == "pop":
+            action = '<pop depth="1"/>'
+        elif action.startswith("pop:"):
+            action = '<pop depth="%s"/>' % action[4:]
+        elif action == "push":
+            action = "<push/>"
+        elif action.startswith("push:"):
+            action = '<push state="%s"/>' % action[5:]
+        else:
+            raise ValueError("unsupported action %r" % (action,))
+    else:
+        action = '<push state="%s"/>' % action
+    return (action,)
+                regex = xml_regex(regex)
+            elif isinstance(regex, pygments_lexer.words):
+                regex = xml_string(
+                    "%s(%s)%s"
+                    % (
+                        regex.prefix,
+                        "|".join(re.escape(w) for w in regex.words),
+                        regex.suffix,
+                    )
+                )
+            else:
+                raise ValueError("expected regex string but got %r" % regex)
+            emitter = resolve_emitter(rule[1])
+            if len(rule) == 2:
+                modifier = ""
+            elif type(rule[2]) is str:
+                modifier = process_state_action(rule[2])[0]
+            elif isinstance(rule[2], pygments_lexer.combined):
+                modifier = '<push state="%s"/>' % '" state="'.join(rule[2])
+            else:
+                raise ValueError("unsupported modifier %r" % (rule[2],))
+            out.append("<rule pattern={}>{}{}</rule>".format(regex, emitter, modifier))
+        elif isinstance(rule, pygments_lexer.include):
+            out.append('<rule><include state="{}"/></rule>'.format(rule))
+        elif isinstance(rule, pygments_lexer.default):
+            process_state_action(rule.state)
+            out.append(
+                "<rule>{}</rule>".format("".join(process_state_action(rule.state)))
+            )
+        else:
+            raise ValueError("unsupported rule %r" % (rule,))
+    return out
+
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="pygments2chroma_xml.py",
+        description="Converts pygments RegexLexer classes to chroma xml grammar definitions.",
+    )
+    parser.add_argument(
+        "lexer_class",
+        type=str,
+        help="The class name of the pygments lexer, like: 'pygments.lexers.jvm.KotlinLexer'.",
+    )
+    args = parser.parse_args()
+
+    package_name, symbol_name = args.lexer_class.rsplit(sep=".", maxsplit=1)
+    lexer_cls = getattr(package, symbol_name)
+
+    assert issubclass(lexer_cls, pygments_lexer.RegexLexer), (
+        "can only translate from RegexLexer"
+    )
+
+    print(
+        pystache.render(
+            TEMPLATE,
+            TemplateView(
+                name=lexer_cls.name,
+                regex_flags=lexer_cls.flags,
+                aliases=[{"alias": alias} for alias in lexer_cls.aliases],
+                filenames=[{"filename": filename} for filename in lexer_cls.filenames],
+                mimetypes=[{"mimetype": mimetype} for mimetype in lexer_cls.mimetypes],
+                tokens=[
+                    {"state": state, "rules": translate_rules(rules)}
+                    for (state, rules) in lexer_cls.get_tokendefs().items()
+                ],
+            ),
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()
+
+package lexers
+
+import (
+	. "github.com/alecthomas/chroma/v2" // nolint
+)
+
+var CFStatement = Register(MustNewLexer(
+	&Config{
+		Name:      "CFStatement",
+		Aliases:   []string{"cfs"},
+		Filenames: []string{},
+		MimeTypes: []string{},
+		CaseInsensitive: true,
+	},
+	cfstatementRules,
+))
+
+/*
+ * Coldfusion statements
+ */
+func cfstatementRules() Rules {
+	return Rules{
+		"root": {
+			{`//.*?\n`, CommentSingle, nil},
+			{`/\*(?:.|\n)*?\*/`, CommentMultiline, nil},
+			{`\+\+|--`, Operator, nil},
+			{`<=|>=|==|\+\+|--|\|\||&&`, Operator, nil},
+			{`[-+*/^&=!<>?]`, Operator, nil},
+			{`mod\b`, Operator, nil},
+			{`(eq|lt|gt|lte|gte|not|is|and|or)\b`, Operator, nil},
+			{`\|\||&&`, Operator, nil},
+			{`\?`, Operator, nil},
+			{`"`, StringDouble, Push("string")},
+			{`'.*?'`, StringSingle, nil},
+			{`\d+`, Number, nil},
+			{
+	    Words(`\b`, `\b`,
+	        "if",
+	        "else",
+	        "len",
+	        "var",
+	        "xml",
+	        "default",
+	        "break",
+	        "switch",
+	        "component",
+	        "property",
+	        "function",
+	        "do",
+	        "try",
+	        "catch",
+	        "in",
+	        "continue",
+	        "for",
+	        "return",
+	        "while",
+	        "required",
+	        "any",
+	        "array",
+	        "binary",
+	        "boolean",
+	        "date",
+	        "guid",
+	        "numeric",
+	        "query",
+	        "string",
+	        "struct",
+	        "uuid",
+	        "case",
+		    ),
+		    Keyword,
+		    nil,
+			},
+			{`(application|session|client|cookie|super|this|variables|arguments)\b`, NameConstant, nil},
+			{`([a-z_$][\w.]*)(\s*)(\()`,
+				ByGroups(NameFunction, Text, Punctuation), nil},
+			{`[a-z_$][\w.]*`, NameVariable, nil},
+			{`[()\[\]{};:,.\\]`, Punctuation, nil},
+			{`\s+`, Text, nil},
+			{`.`, Other, nil},
+		},
+		"string": {
+			{`""`, StringDouble, nil},
+			{`#.+?#`, StringInterpol, nil},
+			{`[^"#]+`, StringDouble, nil},
+			{`#`, StringDouble, nil},
+			{`"`, StringDouble, Pop(1)},
+		},
+	}
+}
+
+/*
+ * Coldfusion markup only
+ */
+var Coldfusion = Register(MustNewLexer(
+  &Config{
+    Name:      "Coldfusion",
+    Aliases:   []string{"cf"},
+    Filenames: []string{"*.cfm", "*.cfml"},
+    MimeTypes: []string{"text/x-coldfusion"},
+  },
+  coldFusionRules,
+))
+
+func coldFusionRules() Rules {
+  return Rules{
+    "root": {
+      {`[^<]+`, Other, nil},
+      Include("tags"),
+      {`<[^<>]*`, Other, nil},
+    },
+
+    "tags": {
+      // CF comments
+      {`<!---`, CommentMultiline, Push("cfcomment")},
+      // HTML comments
+      {`(?s)<!--.*?-->`, Comment, nil},
+      // cfoutput
+      {`(?i)<cfoutput.*?>`, NameTag, Push("cfoutput")},
+      // cfscript blocks
+      {`(?is)(<cfscript.*?>)(.+?)(</cfscript.*?>)`, ByGroups(NameTag, Using("CFStatement"), NameTag), nil},
+      // Generic CF tags
+      {`(?is)(</?cf(?:component|include|if|else|elseif|loop|return|dbinfo|dump|abort|location|invoke|throw|file|savecontent|mailpart|mail|header|content|zip|image|lock|argument|try|catch|break|directory|http|set|function|param|silent|processingdirective|setting|query|queryparam)\b)(.*?)(>)`, ByGroups(NameTag, Using("CFStatement"), NameTag), nil},
+      {`(?is)(<cfquery\b.*?>)(.*?)(</cfquery\b.*?>)`, ByGroups(NameTag, Using("Coldfusion SQL"), NameTag), nil},
+    },
+
+    "cfoutput": {
+      {`[^#<]+`, Other, nil},
+      {`(#)(.*?)(#)`, ByGroups(Punctuation, Using("CFStatement"), Punctuation), nil},
+      {`(?i)</cfoutput.*?>`, NameTag, Pop(1)},
+      Include("tags"),
+      {`(?s)<[^<>]*`, Other, nil},
+      {`#`, Other, nil},
+    },
+    "cfcomment": {
+      {`<!---`, CommentMultiline, Push()},
+      {`--->`, CommentMultiline, Pop(1)},
+      {`([^<-]|<(?!!---)|-(?!-->))+`, CommentMultiline, nil},
+    },
+  }
+}
+
+/*
+ * Coldfusion markup in html
+ */
+var ColdFusionHtml = Register(DelegatingLexer(HTML, MustNewLexer(
+	&Config{
+		Name:      "Coldfusion HTML",
+		Aliases:   []string{"cfm"},
+		Filenames: []string{"*.cfm", "*.cfml"},
+		MimeTypes: []string{"application/x-coldfusion"},
+	},
+	coldFusionRules,
+)));
+
+/*
+ * Coldfusion markup/script components
+ */
+var coldFusionCfc = Register(DelegatingLexer(ColdFusionHtml, MustNewLexer(
+	&Config{
+		Name:      "Coldfusion CFC",
+		Aliases:   []string{"cfc"},
+		Filenames: []string{"*.cfc"},
+		MimeTypes: []string{},
+	},
+	cfstatementRules,
+)));
+
+var ColdFusionSQL = Register(DelegatingLexer(Get("sql"), MustNewLexer(
+  &Config{
+    Name:      "Coldfusion SQL",
+    Aliases:   []string{"cfsql"},
+    Filenames: []string{},
+    MimeTypes: []string{},
+  },
+  coldFusionSQLRules,
+)));
+
+func coldFusionSQLRules() Rules {
+  return Rules{
+    "root": {
+      // CF comments inside SQL
+      {`<!---`, CommentMultiline, Push("cfcomment")},
+
+      // CF tags inside SQL, especially <cfqueryparam>
+      {`(?is)(</?cf[a-z0-9_-]+\b)(.*?)(>)`, ByGroups(NameTag, Using("CFStatement"), NameTag), nil},
+
+      // #expression# interpolation inside SQL
+      {`(#)(.*?)(#)`, ByGroups(Punctuation, Using("CFStatement"), Punctuation), nil},
+
+      // Everything else should be delegated to SQL
+      {`[^<#]+`, Other, nil},
+      {`[<#]`, Other, nil},
+    },
+
+    "cfcomment": {
+      {`<!---`, CommentMultiline, Push()},
+      {`--->`, CommentMultiline, Pop(1)},
+      {`([^<-]|<(?!!---)|-(?!-->))+`, CommentMultiline, nil},
+    },
+  }
+}
+
+<lexer>
+  <config>
+    <name>Coldfusion</name>
+    <alias>cf</alias>
+  </config>
+  <rules>
+    <state name="root">
+      <rule pattern="[^&lt;]+"><token type="Other" /></rule>
+      <rule><include state="tags" /></rule>
+      <rule pattern="&lt;[^&lt;&gt;]*"><token type="Other" /></rule>
+    </state>
+    <state name="tags">
+      <rule pattern="&lt;!---"><token type="CommentMultiline" /><push
+          state="cfcomment"
+        /></rule>
+      <rule pattern="(?s)&lt;!--.*?--&gt;"><token type="Comment" /></rule>
+      <rule pattern="&lt;cfoutput.*?&gt;"><token type="NameBuiltin" /><push
+          state="cfoutput"
+        /></rule>
+      <rule
+        pattern="(?s)(&lt;cfscript.*?&gt;)(.+?)(&lt;/cfscript.*?&gt;)"
+      ><bygroups><token type="NameBuiltin" /><using lexer="Coldfusion" /><token
+            type="NameBuiltin"
+          /></bygroups></rule>
+      <rule
+        pattern="(?s)(&lt;/?cf(?:component|include|if|else|elseif|loop|return|dbinfo|dump|abort|location|invoke|throw|file|savecontent|mailpart|mail|header|content|zip|image|lock|argument|try|catch|break|directory|http|set|function|param|processingdirective)\b)(.*?)((?&lt;!\\)&gt;)"
+      ><bygroups><token type="NameBuiltin" /><using lexer="Coldfusion" /><token
+            type="NameBuiltin"
+          /></bygroups></rule>
+    </state>
+    <state name="cfoutput">
+      <rule pattern="[^#&lt;]+"><token type="Other" /></rule>
+      <rule pattern="(#)(.*?)(#)"><bygroups><token type="Punctuation" /><using
+            lexer="Coldfusion"
+          /><token type="Punctuation" /></bygroups></rule>
+      <rule pattern="&lt;/cfoutput.*?&gt;"><token type="NameBuiltin" /><pop
+          depth="1"
+        /></rule>
+      <rule><include state="tags" /></rule>
+      <rule pattern="(?s)&lt;[^&lt;&gt;]*"><token type="Other" /></rule>
+      <rule pattern="#"><token type="Other" /></rule>
+    </state>
+    <state name="cfcomment">
+      <rule pattern="&lt;!---"><token type="CommentMultiline" /><push /></rule>
+      <rule pattern="---&gt;"><token type="CommentMultiline" /><pop
+          depth="1"
+        /></rule>
+      <rule pattern="([^&lt;-]|&lt;(?!!---)|-(?!--&gt;))+"><token
+          type="CommentMultiline"
+        /></rule>
+    </state>
+
+    <!-- HTML states -->
+    <state name="script-content">
+      <rule pattern="(&lt;)(\s*)(/)(\s*)(script)(\s*)(&gt;)">
+        <bygroups>
+          <token type="Punctuation" />
+          <token type="Text" />
+          <token type="Punctuation" />
+          <token type="Text" />
+          <token type="NameTag" />
+          <token type="Text" />
+          <token type="Punctuation" />
+        </bygroups>
+        <pop depth="1" />
+      </rule>
+      <rule pattern=".+?(?=&lt;\s*/\s*script\s*&gt;)">
+        <using lexer="Javascript" />
+      </rule>
+    </state>
+    <state name="style-content">
+      <rule pattern="(&lt;)(\s*)(/)(\s*)(style)(\s*)(&gt;)">
+        <bygroups>
+          <token type="Punctuation" />
+          <token type="Text" />
+          <token type="Punctuation" />
+          <token type="Text" />
+          <token type="NameTag" />
+          <token type="Text" />
+          <token type="Punctuation" />
+        </bygroups>
+        <pop depth="1" />
+      </rule>
+      <rule pattern=".+?(?=&lt;\s*/\s*style\s*&gt;)">
+        <using lexer="CSS" />
+      </rule>
+    </state>
+    <state name="attr">
+      <rule pattern="&#34;.*?&#34;">
+        <token type="LiteralString" />
+        <pop depth="1" />
+      </rule>
+      <rule pattern="&#39;.*?&#39;">
+        <token type="LiteralString" />
+        <pop depth="1" />
+      </rule>
+      <rule pattern="[^\s&gt;]+">
+        <token type="LiteralString" />
+        <pop depth="1" />
+      </rule>
+    </state>
+    <state name="root">
+      <rule pattern="[^&lt;&amp;]+">
+        <token type="Text" />
+      </rule>
+      <rule pattern="&amp;\S*?;">
+        <token type="NameEntity" />
+      </rule>
+      <rule pattern="\&lt;\!\[CDATA\[.*?\]\]\&gt;">
+        <token type="CommentPreproc" />
+      </rule>
+      <rule pattern="&lt;!--">
+        <token type="Comment" />
+        <push state="comment" />
+      </rule>
+      <rule pattern="&lt;\?.*?\?&gt;">
+        <token type="CommentPreproc" />
+      </rule>
+      <rule pattern="&lt;![^&gt;]*&gt;">
+        <token type="CommentPreproc" />
+      </rule>
+      <rule pattern="(&lt;)(\s*)(script)(\s*)">
+        <bygroups>
+          <token type="Punctuation" />
+          <token type="Text" />
+          <token type="NameTag" />
+          <token type="Text" />
+        </bygroups>
+        <push state="script-content" state="tag" />
+      </rule>
+      <rule pattern="(&lt;)(\s*)(style)(\s*)">
+        <bygroups>
+          <token type="Punctuation" />
+          <token type="Text" />
+          <token type="NameTag" />
+          <token type="Text" />
+        </bygroups>
+        <push state="style-content" state="tag" />
+      </rule>
+      <rule pattern="(&lt;)(\s*)([\w:.-]+)">
+        <bygroups>
+          <token type="Punctuation" />
+          <token type="Text" />
+          <token type="NameTag" />
+        </bygroups>
+        <push state="tag" />
+      </rule>
+      <rule pattern="(&lt;)(\s*)(/)(\s*)([\w:.-]+)(\s*)(&gt;)">
+        <bygroups>
+          <token type="Punctuation" />
+          <token type="Text" />
+          <token type="Punctuation" />
+          <token type="Text" />
+          <token type="NameTag" />
+          <token type="Text" />
+          <token type="Punctuation" />
+        </bygroups>
+      </rule>
+    </state>
+    <state name="comment">
+      <rule pattern="[^-]+">
+        <token type="Comment" />
+      </rule>
+      <rule pattern="--&gt;">
+        <token type="Comment" />
+        <pop depth="1" />
+      </rule>
+      <rule pattern="-">
+        <token type="Comment" />
+      </rule>
+    </state>
+    <state name="tag">
+      <rule pattern="\s+">
+        <token type="Text" />
+      </rule>
+      <rule pattern="([\w:-]+\s*)(=)(\s*)">
+        <bygroups>
+          <token type="NameAttribute" />
+          <token type="Operator" />
+          <token type="Text" />
+        </bygroups>
+        <push state="attr" />
+      </rule>
+      <rule pattern="[\w:-]+">
+        <token type="NameAttribute" />
+      </rule>
+      <rule pattern="(/?)(\s*)(&gt;)">
+        <bygroups>
+          <token type="Punctuation" />
+          <token type="Text" />
+          <token type="Punctuation" />
+        </bygroups>
+        <pop depth="1" />
+      </rule>
+    </state>
+  </rules>
+</lexer>
