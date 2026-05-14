@@ -145,7 +145,7 @@ func coldFusionRules() Rules {
  */
 var ColdFusionHtml = Register(DelegatingLexer(HTML, MustNewLexer(
 	&Config{
-		Name:      "Coldfusion HTML",
+		Name:      "Coldfusion",
 		Aliases:   []string{"cfm"},
 		Filenames: []string{"*.cfm", "*.cfml"},
 		MimeTypes: []string{"application/x-coldfusion"},
@@ -158,7 +158,7 @@ var ColdFusionHtml = Register(DelegatingLexer(HTML, MustNewLexer(
  */
 var coldFusionCfc = Register(DelegatingLexer(ColdFusionHtml, MustNewLexer(
 	&Config{
-		Name:      "Coldfusion CFC",
+		Name:      "Coldfusion",
 		Aliases:   []string{"cfc"},
 		Filenames: []string{"*.cfc"},
 		MimeTypes: []string{},
@@ -168,7 +168,7 @@ var coldFusionCfc = Register(DelegatingLexer(ColdFusionHtml, MustNewLexer(
 
 var ColdFusionSQL = Register(DelegatingLexer(Get("sql"), MustNewLexer(
   &Config{
-    Name:      "Coldfusion SQL",
+    Name:      "Coldfusion",
     Aliases:   []string{"cfsql"},
     Filenames: []string{},
     MimeTypes: []string{},
