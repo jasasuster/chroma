@@ -96,8 +96,8 @@ var Coldfusion = Register(MustNewLexer(
   &Config{
     Name:      "Coldfusion",
     Aliases:   []string{"cf"},
-    Filenames: []string{"*.cfm", "*.cfml"},
-    MimeTypes: []string{"text/x-coldfusion"},
+    Filenames: []string{},
+    MimeTypes: []string{},
   },
   coldFusionRules,
 ))
